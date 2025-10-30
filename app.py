@@ -1,57 +1,38 @@
-# app.py
+# app.py (offline-friendly)
+import math
 import streamlit as st
-import requests
 import folium
 from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Route Status & Vehicle Recommender", layout="wide")
+st.title("🚚 Route Status → Vehicle Recommendation (MVP, offline-friendly)")
 
-st.title("🚚 Route Status → Vehicle Recommendation (MVP)")
+# --- Helpers ---
+def haversine_km(a, b):
+    R = 6371.0
+    lat1, lon1 = math.radians(a[0]), math.radians(a[1])
+    lat2, lon2 = math.radians(b[0]), math.radians(b[1])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    x = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
+    return 2*R*math.asin(math.sqrt(x))
 
-col1, col2 = st.columns(2)
-with col1:
-    origin = st.text_input("Điểm xuất phát", value="Hanoi Tower, Hanoi")
-    destination = st.text_input("Điểm đến", value="My Dinh Bus Station, Hanoi")
-
-with col2:
-    traffic = st.selectbox("Mật độ giao thông", ["Low", "Medium", "High"])
-    weather = st.selectbox("Thời tiết", ["Clear", "Rain", "Storm"])
-    flood = st.selectbox("Ngập lụt", ["None", "Local", "Widespread"])
-
-st.markdown("### Thông tin đơn hàng")
-col3, col4, col5 = st.columns(3)
-with col3:
-    size = st.selectbox("Kích cỡ hàng", ["Small (≤5kg)", "Medium (≤20kg)", "Large (≤200kg)", "Bulky/Over"])
-with col4:
-    urgency = st.selectbox("Mức khẩn cấp", ["Low", "Normal", "High", "Critical (≤2h)"])
-with col5:
-    distance_limit_for_drone_km = st.number_input("Giới hạn km cho drone", min_value=1, max_value=30, value=10)
-
-def geocode(addr):
-    # Nominatim API (free, rate-limited). Dùng thử nghiệm.
-    url = "https://nominatim.openstreetmap.org/search"
-    params = {"q": addr, "format": "json", "limit": 1}
-    r = requests.get(url, params=params, headers={"User-Agent": "streamlit-app"})
-    r.raise_for_status()
-    data = r.json()
-    if not data:
-        return None
-    return float(data[0]["lat"]), float(data[0]["lon"])
-
-def route_points(latlon_a, latlon_b):
-    # OSRM public server (dùng thử). Trả về polyline đơn giản.
-    url = f"https://router.project-osrm.org/route/v1/driving/{latlon_a[1]},{latlon_a[0]};{latlon_b[1]},{latlon_b[0]}"
-    params = {"overview": "full", "geometries": "geojson"}
-    r = requests.get(url, params=params, headers={"User-Agent": "streamlit-app"})
-    r.raise_for_status()
-    js = r.json()
-    if js.get("routes"):
-        coords = js["routes"][0]["geometry"]["coordinates"]  # [lon, lat]
-        dist_km = js["routes"][0]["distance"] / 1000
-        dur_min = js["routes"][0]["duration"] / 60
-        latlons = [(c[1], c[0]) for c in coords]
-        return latlons, dist_km, dur_min
-    return None, None, None
+def estimate_speed_kmh(traffic, weather, flood):
+    # baseline 35 km/h for urban
+    v = 35.0
+    if traffic == "Medium":
+        v *= 0.8
+    elif traffic == "High":
+        v *= 0.6
+    if weather == "Rain":
+        v *= 0.85
+    elif weather == "Storm":
+        v *= 0.6
+    if flood == "Local":
+        v *= 0.85
+    elif flood == "Widespread":
+        v *= 0.5
+    return max(8.0, v)
 
 def recommend(size, urgency, traffic, weather, flood, dist_km, drone_limit_km):
     s = size.split()[0].lower()  # small/medium/large/bulky
@@ -59,7 +40,6 @@ def recommend(size, urgency, traffic, weather, flood, dist_km, drone_limit_km):
 
     allow_drone = (weather in ["Clear", "Rain"]) and (flood != "Widespread") and (dist_km is not None and dist_km <= drone_limit_km)
 
-    # Luật tối giản (có thể mở rộng)
     if s == "small":
         if u.startswith("critical"):
             if allow_drone and traffic == "High":
@@ -83,31 +63,70 @@ def recommend(size, urgency, traffic, weather, flood, dist_km, drone_limit_km):
     else:  # bulky/over
         return ["Truck", "Specialized vehicle"]
 
-run = st.button("Tính toán & Vẽ tuyến")
+# --- UI ---
+mode = st.radio("Chọn cách nhập điểm:", ["Nhập địa chỉ mẫu (có sẵn)", "Nhập toạ độ (lat, lon)"], horizontal=True)
 
-if run:
-    try:
-        a = geocode(origin)
-        b = geocode(destination)
-        if not a or not b:
-            st.error("Không tìm được toạ độ địa chỉ. Thử đổi địa chỉ cụ thể hơn.")
-        else:
-            pts, dist_km, dur_min = route_points(a, b)
-            if not pts:
-                st.error("Không vẽ được tuyến. Thử điểm khác.")
-            else:
-                recs = recommend(size, urgency, traffic, weather, flood, dist_km, distance_limit_for_drone_km)
-                st.success(f"Đề xuất phương tiện: {', '.join(recs)}")
-                st.info(f"Quãng đường ~ {dist_km:.1f} km • Thời gian ~ {dur_min:.0f} phút (ước lượng OSRM)")
+# A few safe preset addresses with coordinates to avoid external geocoding
+presets = {
+    "Hanoi Tower, Hanoi": (21.026754, 105.846083),
+    "My Dinh Bus Station, Hanoi": (21.028762, 105.776900),
+    "Noi Bai Airport, Hanoi": (21.214184, 105.802827),
+    "Hoan Kiem Lake, Hanoi": (21.028511, 105.852005),
+}
 
-                m = folium.Map(location=pts[len(pts)//2], zoom_start=12)
-                folium.Marker(a, tooltip="Xuất phát").add_to(m)
-                folium.Marker(b, tooltip="Điểm đến").add_to(m)
-                folium.PolyLine(pts, weight=5).add_to(m)
+if mode == "Nhập địa chỉ mẫu (có sẵn)":
+    colA, colB = st.columns(2)
+    with colA:
+        origin_name = st.selectbox("Điểm xuất phát (mẫu)", list(presets.keys()), index=0)
+    with colB:
+        dest_name = st.selectbox("Điểm đến (mẫu)", list(presets.keys()), index=1)
+    origin = presets[origin_name]
+    destination = presets[dest_name]
+else:
+    colA, colB = st.columns(2)
+    with colA:
+        o_lat = st.number_input("Xuất phát - lat", value=21.026754, format="%.6f")
+        o_lon = st.number_input("Xuất phát - lon", value=105.846083, format="%.6f")
+    with colB:
+        d_lat = st.number_input("Điểm đến - lat", value=21.028762, format="%.6f")
+        d_lon = st.number_input("Điểm đến - lon", value=105.776900, format="%.6f")
+    origin = (o_lat, o_lon)
+    destination = (d_lat, d_lon)
 
-                status = f"Traffic: {traffic} • Weather: {weather} • Flood: {flood}"
-                folium.Marker(pts[len(pts)//2], tooltip=status, popup=status).add_to(m)
+col1, col2, col3 = st.columns(3)
+with col1:
+    traffic = st.selectbox("Mật độ giao thông", ["Low", "Medium", "High"])
+with col2:
+    weather = st.selectbox("Thời tiết", ["Clear", "Rain", "Storm"])
+with col3:
+    flood = st.selectbox("Ngập lụt", ["None", "Local", "Widespread"])
 
-                st_folium(m, width=900, height=500)
-    except Exception as e:
-        st.error(f"Lỗi: {e}")
+st.markdown("### Thông tin đơn hàng")
+col3, col4, col5 = st.columns(3)
+with col3:
+    size = st.selectbox("Kích cỡ hàng", ["Small (≤5kg)", "Medium (≤20kg)", "Large (≤200kg)", "Bulky/Over"])
+with col4:
+    urgency = st.selectbox("Mức khẩn cấp", ["Low", "Normal", "High", "Critical (≤2h)"])
+with col5:
+    distance_limit_for_drone_km = st.number_input("Giới hạn km cho drone", min_value=1, max_value=30, value=10)
+
+if st.button("Tính toán & Vẽ tuyến"):
+    dist_km = haversine_km(origin, destination)
+    speed = estimate_speed_kmh(traffic, weather, flood)
+    est_minutes = max(1, int((dist_km / speed) * 60))
+
+    recs = recommend(size, urgency, traffic, weather, flood, dist_km, distance_limit_for_drone_km)
+    st.success(f"Đề xuất phương tiện: {', '.join(recs)}")
+    st.info(f"Quãng đường ước lượng (đường thẳng) ~ {dist_km:.1f} km • Thời gian ước lượng ~ {est_minutes} phút (v={speed:.0f} km/h)")
+
+    # Draw simple straight line on map (offline-friendly; no external routing call)
+    mid = ((origin[0] + destination[0]) / 2, (origin[1] + destination[1]) / 2)
+    m = folium.Map(location=mid, zoom_start=12)
+    folium.Marker(origin, tooltip="Xuất phát").add_to(m)
+    folium.Marker(destination, tooltip="Điểm đến").add_to(m)
+    folium.PolyLine([origin, destination], weight=5).add_to(m)
+    status = f"Traffic: {traffic} • Weather: {weather} • Flood: {flood}"
+    folium.Marker(mid, tooltip=status, popup=status).add_to(m)
+    st_folium(m, width=900, height=500)
+
+st.caption("Gợi ý: bản này không gọi API bên ngoài để tránh lỗi kết nối. Bạn có thể chuyển sang nhập toạ độ nếu cần địa điểm khác.")
