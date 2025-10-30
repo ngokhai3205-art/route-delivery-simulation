@@ -1,3 +1,5 @@
+# app.py — Route Status → Vehicle Recommendation (with ORS routing)
+import os
 import math
 import datetime as dt
 import requests
@@ -7,9 +9,12 @@ from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
 
+# ORS (đường thật)
+import openrouteservice as ors
+
 # -------------------- CONFIG --------------------
 st.set_page_config(page_title="Route Status & Vehicle Recommender", layout="wide")
-st.title("🚚 Route Status → Vehicle Recommendation (auto status)")
+st.title("🚚 Route Status → Vehicle Recommendation")
 
 # -------------------- HELPERS -------------------
 def haversine_km(a, b):
@@ -82,8 +87,7 @@ def get_weather_and_flood(lat, lon):
     """Lấy thời tiết hiện tại & lượng mưa 24h từ Open-Meteo (free, no key)."""
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
-        "latitude": lat,
-        "longitude": lon,
+        "latitude": lat, "longitude": lon,
         "current_weather": True,
         "hourly": "precipitation",
         "past_days": 1,
@@ -123,6 +127,31 @@ def estimate_traffic_level(hour_local, weekday, weather):
     bump = {"Clear": 0, "Rain": 1, "Storm": 2}.get(weather, 0)
     order = ["Low", "Medium", "High"]
     return order[min(2, order.index(level) + bump)]
+
+# ---------- ORS routing (đường thật) ----------
+def ors_client():
+    # Lấy key từ Secrets (Streamlit Cloud) hoặc biến môi trường
+    key = st.secrets.get("ORS_API_KEY") if hasattr(st, "secrets") else None
+    if not key:
+        key = os.getenv("ORS_API_KEY")
+    if not key:
+        return None
+    try:
+        return ors.Client(key=key, timeout=15)
+    except Exception:
+        return None
+
+# profile: "driving-car" (van/xe hơi), "driving-hgv" (truck),
+# "cycling-electric" (xấp xỉ đường 2 bánh đô thị)
+def get_ors_route(client, origin, destination, profile="driving-car"):
+    # ORS dùng (lon, lat)
+    coords = [(origin[1], origin[0]), (destination[1], destination[0])]
+    res = client.directions(coordinates=coords, profile=profile, format="geojson")
+    line = res["features"][0]["geometry"]  # GeoJSON LineString
+    latlon = [(pt[1], pt[0]) for pt in line["coordinates"]]  # cho folium
+    dist_m = res["features"][0]["properties"]["summary"]["distance"]
+    time_s = res["features"][0]["properties"]["summary"]["duration"]
+    return latlon, dist_m / 1000.0, time_s / 60.0
 
 # -------------------- INPUTS --------------------
 # 3 chế độ nhập điểm: địa chỉ / tọa độ / mẫu
@@ -252,14 +281,50 @@ if st.session_state.calc:
     st.info(f"Quãng đường ước lượng (đường thẳng) ~ {c['dist_km']:.1f} km • "
             f"Thời gian ước lượng ~ {c['est_minutes']} phút (v={c['speed']:.0f} km/h)")
 
+    # Tuỳ chọn dùng tuyến thật (ORS)
+    use_ors = st.checkbox("Dùng tuyến đường thật (OpenRouteService)", value=True)
+    profile_label = st.selectbox(
+        "Hồ sơ tuyến",
+        ["Van/Car (driving-car)", "Motorbike approx (cycling-electric)", "Truck (driving-hgv)"],
+        index=0
+    )
+    profile_map = {
+        "Van/Car (driving-car)": "driving-car",
+        "Motorbike approx (cycling-electric)": "cycling-electric",
+        "Truck (driving-hgv)": "driving-hgv",
+    }
+    profile = profile_map[profile_label]
+
     mid = ((c["origin"][0] + c["destination"][0]) / 2, (c["origin"][1] + c["destination"][1]) / 2)
     m = folium.Map(location=mid, zoom_start=12)
     folium.Marker(c["origin"], tooltip="Xuất phát").add_to(m)
     folium.Marker(c["destination"], tooltip="Điểm đến").add_to(m)
-    # Tuyến đơn giản: đường thẳng (offline-friendly). Có thể thay bằng tuyến thật bằng ORS/Mapbox sau này.
-    folium.PolyLine([c["origin"], c["destination"]], weight=5).add_to(m)
-    status = f"Traffic: {c['traffic']} • Weather: {c['weather']} • Flood: {c['flood']}"
-    folium.Marker(mid, tooltip=status, popup=status).add_to(m)
-    st_folium(m, width=900, height=500)
 
-st.caption("Gợi ý: Status auto = thời tiết (Open-Meteo) + suy luận ngập theo mưa 24h + giao thông theo giờ cao điểm & thời tiết.")
+    drawn_straight = False
+    if use_ors:
+        client = ors_client()
+        if client:
+            try:
+                path, dist_real_km, time_real_min = get_ors_route(
+                    client, c["origin"], c["destination"], profile=profile
+                )
+                folium.PolyLine(path, weight=5, tooltip=f"ORS {profile}").add_to(m)
+                st.info(f"**Tuyến ORS** ~ {dist_real_km:.1f} km • ~ {int(time_real_min)} phút ({profile})")
+            except Exception as e:
+                st.warning(f"Không lấy được tuyến ORS (sẽ vẽ đường thẳng). Lý do: {e}")
+                drawn_straight = True
+        else:
+            st.warning("Chưa thiết lập ORS_API_KEY trong Secrets. Đang dùng đường thẳng.")
+            drawn_straight = True
+    else:
+        drawn_straight = True
+
+    if drawn_straight:
+        folium.PolyLine([c["origin"], c["destination"]], weight=5, tooltip="Straight line").add_to(m)
+
+    status = f"Traffic: {c['traffic']} • Weather: {c['weather']} • Flood: {c['flood']}"
+    mid_marker = ((c["origin"][0] + c["destination"][0]) / 2, (c["origin"][1] + c["destination"][1]) / 2)
+    folium.Marker(mid_marker, tooltip=status, popup=status).add_to(m)
+    st_folium(m, width=900, height=520)
+
+st.caption("Status auto: thời tiết (Open-Meteo) + suy luận ngập theo mưa 24h + giao thông theo giờ cao điểm & thời tiết. ORS vẽ tuyến đường thật.")
