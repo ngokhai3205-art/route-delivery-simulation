@@ -110,23 +110,47 @@ with col4:
 with col5:
     distance_limit_for_drone_km = st.number_input("Giới hạn km cho drone", min_value=1, max_value=30, value=10)
 
-if st.button("Tính toán & Vẽ tuyến"):
+# --- Persist state to avoid disappearing after rerun ---
+if "calc" not in st.session_state:
+    st.session_state.calc = None
+
+pressed = st.button("Tính toán & Vẽ tuyến")
+
+if pressed:
+    # Lưu cả input + output vào session_state
     dist_km = haversine_km(origin, destination)
     speed = estimate_speed_kmh(traffic, weather, flood)
     est_minutes = max(1, int((dist_km / speed) * 60))
-
     recs = recommend(size, urgency, traffic, weather, flood, dist_km, distance_limit_for_drone_km)
-    st.success(f"Đề xuất phương tiện: {', '.join(recs)}")
-    st.info(f"Quãng đường ước lượng (đường thẳng) ~ {dist_km:.1f} km • Thời gian ước lượng ~ {est_minutes} phút (v={speed:.0f} km/h)")
 
-    # Draw simple straight line on map (offline-friendly; no external routing call)
-    mid = ((origin[0] + destination[0]) / 2, (origin[1] + destination[1]) / 2)
+    st.session_state.calc = {
+        "origin": origin,
+        "destination": destination,
+        "traffic": traffic,
+        "weather": weather,
+        "flood": flood,
+        "size": size,
+        "urgency": urgency,
+        "drone_limit": distance_limit_for_drone_km,
+        "dist_km": dist_km,
+        "speed": speed,
+        "est_minutes": est_minutes,
+        "recs": recs,
+    }
+
+# Hiển thị lại kết quả nếu đã tính (kể cả sau rerun do tương tác map)
+if st.session_state.calc:
+    c = st.session_state.calc
+    st.success(f"Đề xuất phương tiện: {', '.join(c['recs'])}")
+    st.info(f"Quãng đường ước lượng (đường thẳng) ~ {c['dist_km']:.1f} km • "
+            f"Thời gian ước lượng ~ {c['est_minutes']} phút (v={c['speed']:.0f} km/h)")
+
+    # Vẽ bản đồ từ state (không phụ thuộc vào button nữa)
+    mid = ((c["origin"][0] + c["destination"][0]) / 2, (c["origin"][1] + c["destination"][1]) / 2)
     m = folium.Map(location=mid, zoom_start=12)
-    folium.Marker(origin, tooltip="Xuất phát").add_to(m)
-    folium.Marker(destination, tooltip="Điểm đến").add_to(m)
-    folium.PolyLine([origin, destination], weight=5).add_to(m)
-    status = f"Traffic: {traffic} • Weather: {weather} • Flood: {flood}"
+    folium.Marker(c["origin"], tooltip="Xuất phát").add_to(m)
+    folium.Marker(c["destination"], tooltip="Điểm đến").add_to(m)
+    folium.PolyLine([c["origin"], c["destination"]], weight=5).add_to(m)
+    status = f"Traffic: {c['traffic']} • Weather: {c['weather']} • Flood: {c['flood']}"
     folium.Marker(mid, tooltip=status, popup=status).add_to(m)
     st_folium(m, width=900, height=500)
-
-st.caption("Gợi ý: bản này không gọi API bên ngoài để tránh lỗi kết nối. Bạn có thể chuyển sang nhập toạ độ nếu cần địa điểm khác.")
