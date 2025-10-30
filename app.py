@@ -64,7 +64,70 @@ def recommend(size, urgency, traffic, weather, flood, dist_km, drone_limit_km):
         return ["Truck", "Specialized vehicle"]
 
 # --- UI ---
-mode = st.radio("Chọn cách nhập điểm:", ["Nhập địa chỉ mẫu (có sẵn)", "Nhập toạ độ (lat, lon)"], horizontal=True)
+# --- NHẬP ĐỊA CHỈ / TỌA ĐỘ ---
+from geopy.geocoders import Nominatim
+from geopy.extra.rate_limiter import RateLimiter
+
+# bộ chuyển địa chỉ -> tọa độ (cần internet)
+_geolocator = Nominatim(user_agent="route-delivery-sim-ngokhai3205-art")
+_geocode = RateLimiter(_geolocator.geocode, min_delay_seconds=1, swallow_exceptions=True)
+
+mode = st.radio("Chọn cách nhập điểm:", 
+                ["Nhập địa chỉ", "Nhập tọa độ (lat, lon)", "Chọn địa chỉ mẫu (có sẵn)"], 
+                horizontal=True)
+
+origin = destination = None
+
+if mode == "Nhập địa chỉ":
+    colA, colB = st.columns(2)
+    with colA:
+        start_addr = st.text_input("Điểm xuất phát (ví dụ: 1 Đại Cồ Việt, Hai Bà Trưng, Hà Nội)")
+    with colB:
+        dest_addr  = st.text_input("Điểm đến (ví dụ: Bến xe Mỹ Đình, Nam Từ Liêm, Hà Nội)")
+
+    # Nút lấy tọa độ từ địa chỉ (lưu vào session_state để không biến mất sau rerun)
+    if "geo" not in st.session_state:
+        st.session_state.geo = {"origin": None, "destination": None}
+
+    if st.button("📍 Lấy tọa độ từ địa chỉ"):
+        with st.spinner("Đang tìm tọa độ..."):
+            loc1 = _geocode(start_addr) if start_addr else None
+            loc2 = _geocode(dest_addr)  if dest_addr  else None
+        if loc1 and loc2:
+            st.session_state.geo["origin"] = (loc1.latitude, loc1.longitude)
+            st.session_state.geo["destination"] = (loc2.latitude, loc2.longitude)
+            st.success("✅ Đã xác định được tọa độ cho cả hai địa chỉ!")
+        else:
+            st.error("❌ Chưa tìm được. Hãy nhập địa chỉ cụ thể hơn (số nhà, phường/quận, thành phố).")
+
+    origin = st.session_state.geo["origin"]
+    destination = st.session_state.geo["destination"]
+
+elif mode == "Nhập tọa độ (lat, lon)":
+    colA, colB = st.columns(2)
+    with colA:
+        o_lat = st.number_input("Xuất phát - lat", value=21.026754, format="%.6f")
+        o_lon = st.number_input("Xuất phát - lon", value=105.846083, format="%.6f")
+    with colB:
+        d_lat = st.number_input("Điểm đến - lat", value=21.028762, format="%.6f")
+        d_lon = st.number_input("Điểm đến - lon", value=105.776900, format="%.6f")
+    origin = (o_lat, o_lon)
+    destination = (d_lat, d_lon)
+
+else:  # Chọn địa chỉ mẫu (có sẵn)
+    presets = {
+        "Hanoi Tower, Hanoi": (21.026754, 105.846083),
+        "My Dinh Bus Station, Hanoi": (21.028762, 105.776900),
+        "Noi Bai Airport, Hanoi": (21.214184, 105.802827),
+        "Hoan Kiem Lake, Hanoi": (21.028511, 105.852005),
+    }
+    colA, colB = st.columns(2)
+    with colA:
+        origin_name = st.selectbox("Điểm xuất phát (mẫu)", list(presets.keys()), index=2)
+    with colB:
+        dest_name = st.selectbox("Điểm đến (mẫu)", list(presets.keys()), index=0)
+    origin = presets[origin_name]
+    destination = presets[dest_name]
 
 # A few safe preset addresses with coordinates to avoid external geocoding
 presets = {
